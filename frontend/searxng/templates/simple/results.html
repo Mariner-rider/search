@@ -1,0 +1,40 @@
+{% extends 'simple/base.html' %}
+
+{% block content %}
+<div class="bsearch-layout">
+  <section class="bsearch-main">
+    <h2>Search Results</h2>
+    {% for result in results %}
+      <article class="result-item">
+        <h3><a href="{{ result.url }}">{{ result.title }}</a></h3>
+        <p>{{ result.content }}</p>
+      </article>
+    {% endfor %}
+  </section>
+
+  <aside class="bsearch-side">
+    <section class="panel ai-overview">
+      <h3>AI Overview</h3>
+      <p>{{ extra_data.ai_overview.summary if extra_data and extra_data.ai_overview else 'No AI overview yet.' }}</p>
+    </section>
+
+    <section class="panel knowledge-panel">
+      <h3>Knowledge Panel</h3>
+      <p>{{ extra_data.knowledge_panel.description if extra_data and extra_data.knowledge_panel else 'No knowledge panel data.' }}</p>
+    </section>
+
+    <section class="panel ads-panel">
+      <h3>Sponsored</h3>
+      {% if extra_data and extra_data.ads %}
+        <ul>
+          {% for ad in extra_data.ads %}
+            <li><a href="{{ ad.url }}">{{ ad.title }}</a></li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p>No ads available.</p>
+      {% endif %}
+    </section>
+  </aside>
+</div>
+{% endblock %}
