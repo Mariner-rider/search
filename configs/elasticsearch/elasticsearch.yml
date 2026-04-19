@@ -1,0 +1,6 @@
+cluster.name: bsearch
+node.name: bsearch-node-1
+discovery.type: single-node
+xpack.security.enabled: false
+http.compression: true
+http.compression_level: 3

@@ -1,0 +1,302 @@
+version: '3.9'
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    ports: ['6379:6379']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 256m
+    cpus: '0.30'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: search
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ['5432:5432']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 512m
+    cpus: '0.50'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d search']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: 'false'
+      http.compression: 'true'
+      ES_JAVA_OPTS: ${ES_JAVA_OPTS:--Xms512m -Xmx512m}
+    ports: ['9200:9200']
+    volumes:
+      - ./configs/elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 1536m
+    cpus: '1.20'
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:9200 >/dev/null || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+  llm-answer:
+    build:
+      context: .
+      dockerfile: services/llm_answer/Dockerfile
+    environment:
+      AI_PROVIDER: local
+      LLM_API_URL: ''
+      LLM_API_KEY: ''
+      LLM_MODEL: gpt-4o-mini
+    ports: ['8016:8016']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 384m
+    cpus: '0.50'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:8016/healthz >/dev/null || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  search-api:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: >
+      sh -c "pip install -q -e . && uvicorn services.api.app.main:app --host 0.0.0.0 --port 8000 --workers 1"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      ADS_PER_PAGE: 3
+      SEARCH_INDEX_NAME: search_documents
+      LLM_ANSWER_ENGINE_URL: http://llm-answer:8016
+      YACY_INTEGRATION_URL: http://yacy-integration:8015
+      GEOIP_DB_PATH: /app/data/GeoLite2-City.mmdb
+      ENABLE_YACY: ${ENABLE_YACY:-true}
+      ENABLE_NUTCH: ${ENABLE_NUTCH:-true}
+      ENABLE_STORMCRAWLER: ${ENABLE_STORMCRAWLER:-true}
+      ENABLE_SCRAPY: ${ENABLE_SCRAPY:-true}
+      DISTRIBUTED_CRAWLING: ${DISTRIBUTED_CRAWLING:-true}
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      llm-answer:
+        condition: service_healthy
+    ports: ['8000:8000']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 768m
+    cpus: '0.80'
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:8000/search?query=ping >/dev/null || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports: ['6333:6333']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 768m
+    cpus: '0.70'
+
+  searxng:
+    image: searxng/searxng:latest
+    environment:
+      SEARXNG_SETTINGS_PATH: /etc/searxng/settings.yml
+    volumes:
+      - ./frontend/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ./frontend/searxng/templates/simple/results.html:/usr/local/searxng/searx/templates/simple/results.html:ro
+    depends_on:
+      search-api:
+        condition: service_healthy
+    ports: ['8080:8080']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 512m
+    cpus: '0.50'
+
+  yacy:
+    image: yacy/yacy_search_server:latest
+    ports: ['8090:8090']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 1024m
+    cpus: '1.00'
+    profiles: ['yacy']
+
+  haystack-api:
+    image: deepset/haystack:latest
+    command: ["haystack-api", "--host", "0.0.0.0", "--port", "8000"]
+    ports: ['8005:8000']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 768m
+    cpus: '0.80'
+
+  nutch-wrapper:
+    build:
+      context: .
+      dockerfile: services/nutch_wrapper/Dockerfile
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      NUTCH_DIR: /workspace/services/nutch
+      NUTCH_JSON_OUTPUT: /workspace/data/nutch-json
+      DISTRIBUTED_CRAWLING: ${DISTRIBUTED_CRAWLING:-true}
+    volumes:
+      - ./:/workspace
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports: ['8011:8011']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 384m
+    cpus: '0.40'
+    profiles: ['nutch']
+
+  storm-wrapper:
+    build:
+      context: .
+      dockerfile: services/storm_wrapper/Dockerfile
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      STORMCRAWLER_DIR: /workspace/services/stormcrawler
+      STORM_STATUS_FILE: /workspace/data/stormcrawler/status.json
+      DISTRIBUTED_CRAWLING: ${DISTRIBUTED_CRAWLING:-true}
+    volumes:
+      - ./:/workspace
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports: ['8013:8013']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 384m
+    cpus: '0.40'
+    profiles: ['storm']
+
+  crawler-gateway:
+    build:
+      context: .
+      dockerfile: services/crawler_gateway/Dockerfile
+    environment:
+      DEFAULT_CRAWLER_ENGINE: nutch
+      ENABLE_NUTCH: ${ENABLE_NUTCH:-true}
+      ENABLE_STORMCRAWLER: ${ENABLE_STORMCRAWLER:-true}
+      DISTRIBUTED_CRAWLING: ${DISTRIBUTED_CRAWLING:-true}
+    depends_on:
+      - nutch-wrapper
+      - storm-wrapper
+    ports: ['8014:8014']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 256m
+    cpus: '0.30'
+
+  processor-service:
+    build:
+      context: .
+      dockerfile: services/processor/Dockerfile
+    environment:
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      SEARCH_INDEX_NAME: search_documents
+    volumes:
+      - ./:/workspace
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    ports: ['8012:8012']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 512m
+    cpus: '0.50'
+
+  yacy-integration:
+    build:
+      context: .
+      dockerfile: services/yacy_integration/Dockerfile
+    depends_on:
+      - yacy
+      - elasticsearch
+    ports: ['8015:8015']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 384m
+    cpus: '0.40'
+    profiles: ['yacy']
+
+  scrapy-crawler:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: >
+      sh -c "pip install -q scrapy redis && sleep infinity"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      DISTRIBUTED_CRAWLING: ${DISTRIBUTED_CRAWLING:-false}
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 384m
+    cpus: '0.40'
+    profiles: ['scrapy']
+
+  integration-orchestrator:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: >
+      sh -c "pip install -q fastapi uvicorn pydantic && uvicorn services.orchestrator.app.main:app --host 0.0.0.0 --port 8010 --workers 1"
+    depends_on:
+      - searxng
+      - search-api
+      - llm-answer
+      - yacy
+      - yacy-integration
+      - haystack-api
+      - qdrant
+      - nutch-wrapper
+      - storm-wrapper
+      - crawler-gateway
+      - processor-service
+    ports: ['8010:8010']
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: 256m
+    cpus: '0.30'

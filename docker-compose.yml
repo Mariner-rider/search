@@ -1,0 +1,246 @@
+version: '3.9'
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+x-deploy-limits: &default-deploy
+  resources:
+    limits:
+      memory: 1g
+      cpus: '0.5'
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: bsearch-redis
+    command: ['redis-server', '--save', '', '--appendonly', 'no']
+    ports: ['6379:6379']
+    restart: unless-stopped
+    logging: *default-logging
+    deploy: *default-deploy
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [bsearch_net]
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+    container_name: bsearch-elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: 'false'
+      http.compression: 'true'
+      ES_JAVA_OPTS: ${ES_JAVA_OPTS:--Xms512m -Xmx512m}
+    ports: ['9200:9200']
+    volumes:
+      - ./configs/elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+    restart: unless-stopped
+    logging: *default-logging
+    deploy: *default-deploy
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:9200 >/dev/null || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 20
+    networks: [bsearch_net]
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: bsearch-postgres
+    environment:
+      POSTGRES_DB: search
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports: ['5432:5432']
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    logging: *default-logging
+    deploy: *default-deploy
+    networks: [bsearch_net]
+
+  llm-answer:
+    build:
+      context: .
+      dockerfile: services/llm_answer/Dockerfile
+    container_name: bsearch-llm-answer
+    environment:
+      AI_PROVIDER: local
+      LLM_API_URL: ''
+      LLM_API_KEY: ''
+      LLM_MODEL: gpt-4o-mini
+    ports: ['8016:8016']
+    restart: unless-stopped
+    logging: *default-logging
+    deploy: *default-deploy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:8016/healthz >/dev/null || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks: [bsearch_net]
+
+  search-api:
+    image: python:3.11-slim
+    container_name: bsearch-search-api
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: >
+      sh -c "pip install -q -e . && uvicorn services.api.app.main:app --host 0.0.0.0 --port 8000 --workers 1"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      POSTGRES_URL: postgresql://postgres:postgres@postgres:5432/search
+      ADS_PER_PAGE: 3
+      SEARCH_INDEX_NAME: search_documents
+      LLM_ANSWER_ENGINE_URL: http://llm-answer:8016
+      YACY_INTEGRATION_URL: http://yacy-integration:8015
+      GEOIP_DB_PATH: /app/data/GeoLite2-City.mmdb
+      ENABLE_YACY: ${ENABLE_YACY:-false}
+      ENABLE_NUTCH: ${ENABLE_NUTCH:-false}
+      ENABLE_STORMCRAWLER: ${ENABLE_STORMCRAWLER:-false}
+      ENABLE_SCRAPY: ${ENABLE_SCRAPY:-true}
+      DISTRIBUTED_CRAWLING: ${DISTRIBUTED_CRAWLING:-false}
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      llm-answer:
+        condition: service_healthy
+    ports: ['8000:8000']
+    restart: unless-stopped
+    logging: *default-logging
+    deploy: *default-deploy
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://localhost:8000/search?query=ping >/dev/null || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    networks: [bsearch_net]
+
+  nutch:
+    image: eclipse-temurin:17-jre-alpine
+    container_name: bsearch-nutch
+    working_dir: /workspace/services/nutch
+    command: ['sh', '-c', 'sleep infinity']
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    volumes:
+      - ./:/workspace
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    profiles: ['nutch']
+    restart: unless-stopped
+    logging: *default-logging
+    deploy: *default-deploy
+    networks: [bsearch_net]
+
+  stormcrawler:
+    image: eclipse-temurin:17-jre-alpine
+    container_name: bsearch-stormcrawler
+    working_dir: /workspace/services/stormcrawler
+    command: ['sh', '-c', 'sleep infinity']
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: '6379'
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+    volumes:
+      - ./:/workspace
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    profiles: ['stormcrawler']
+    restart: unless-stopped
+    logging: *default-logging
+    deploy: *default-deploy
+    networks: [bsearch_net]
+
+  yacy:
+    image: yacy/yacy_search_server:latest
+    container_name: bsearch-yacy
+    environment:
+      YACY_LANG: en
+    ports: ['8090:8090']
+    profiles: ['yacy']
+    restart: unless-stopped
+    logging: *default-logging
+    deploy: *default-deploy
+    networks: [bsearch_net]
+
+  yacy-integration:
+    build:
+      context: .
+      dockerfile: services/yacy_integration/Dockerfile
+    container_name: bsearch-yacy-integration
+    depends_on:
+      yacy:
+        condition: service_started
+      elasticsearch:
+        condition: service_healthy
+    profiles: ['yacy']
+    ports: ['8015:8015']
+    restart: unless-stopped
+    logging: *default-logging
+    deploy: *default-deploy
+    networks: [bsearch_net]
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: bsearch-searxng
+    environment:
+      SEARXNG_SETTINGS_PATH: /etc/searxng/settings.yml
+    volumes:
+      - ./frontend/searxng/settings.yml:/etc/searxng/settings.yml:ro
+      - ./frontend/searxng/templates/simple/results.html:/usr/local/searxng/searx/templates/simple/results.html:ro
+    depends_on:
+      search-api:
+        condition: service_healthy
+    ports: ['8080:8080']
+    restart: unless-stopped
+    logging: *default-logging
+    deploy: *default-deploy
+    networks: [bsearch_net]
+
+  scrapy-crawler:
+    image: python:3.11-alpine
+    container_name: bsearch-scrapy
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: >
+      sh -c "pip install -q scrapy redis && sleep infinity"
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      ELASTICSEARCH_URL: http://elasticsearch:9200
+      DISTRIBUTED_CRAWLING: ${DISTRIBUTED_CRAWLING:-false}
+    depends_on:
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+    deploy: *default-deploy
+    profiles: ['scrapy']
+    networks: [bsearch_net]
+
+networks:
+  bsearch_net:
+    driver: bridge
+
+volumes:
+  pg_data:

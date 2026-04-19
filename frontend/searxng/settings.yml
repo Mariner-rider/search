@@ -1,0 +1,67 @@
+use_default_settings: true
+
+general:
+  instance_name: BSearch Frontend
+
+search:
+  safe_search: 0
+  autocomplete: ''
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: changeme-in-prod
+  limiter: false
+
+engines:
+  - name: bsearch
+    engine: json_engine
+    search_url: http://search-api:8000/search?query={query}&page=1&page_size=10&ai_mode=true
+    categories: general
+    timeout: 10.0
+    method: GET
+    results_query: results
+    url_query: url
+    title_query: title
+    content_query: snippet
+    disabled: false
+
+  - name: bsearch-images
+    engine: json_engine
+    search_url: http://search-api:8000/images?query={query}&size=20
+    categories: images
+    timeout: 10.0
+    method: GET
+    results_query: results
+    url_query: page_url
+    title_query: title
+    content_query: image_url
+    disabled: false
+
+  - name: bsearch-videos
+    engine: json_engine
+    search_url: http://search-api:8000/videos?query={query}&size=20
+    categories: videos
+    timeout: 10.0
+    method: GET
+    results_query: results
+    url_query: video_url
+    title_query: title
+    content_query: provider
+    disabled: false
+
+  - name: bsearch-news
+    engine: json_engine
+    search_url: http://search-api:8000/news?query={query}&size=20
+    categories: news
+    timeout: 10.0
+    method: GET
+    results_query: results
+    url_query: url
+    title_query: title
+    content_query: snippet
+    disabled: false
+
+ui:
+  static_use_hash: true
